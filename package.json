@@ -1,0 +1,22 @@
+{
+  "name": "token-sales",
+  "version": "1.0.0",
+  "description": "wisdomise token sales contracts",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^2.0.0",
+    "chai": "^4.3.10",
+    "ethers": "^5.4.7",
+    "hardhat": "^2.12.7"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.3",
+    "dotenv": "^16.0.3",
+    "ethereum-waffle": "^4.0.10"
+  }
+}

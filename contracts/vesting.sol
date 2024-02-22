@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-pragma solidity ^0.8.0;
+pragma solidity =0.8.18;
 import "@openzeppelin/contracts/finance/VestingWallet.sol";
 
 contract Vesting is VestingWallet {
     uint64[] vestingReleaseTimestamp;
-    uint8 tgeReleasePercentage;
+    uint32 tgeReleasePercentage;
 
     constructor(
         address beneficiary,
-        uint8 _tgeReleasePercentage,
+        uint32 _tgeReleasePercentage,
         uint64[] memory _vestingReleaseTimestamp
     )
         VestingWallet(
@@ -25,18 +25,18 @@ contract Vesting is VestingWallet {
         revert("Not Allowed");
     }
 
-    function _setTgeReleasePercentage(uint8 _tgeReleasePercentage) private {
-        require(_tgeReleasePercentage < 100, "percentage value!");
+    function _setTgeReleasePercentage(uint32 _tgeReleasePercentage) private {
+        require(_tgeReleasePercentage <= 10 ** 6, "Vesting: tge release should not be more than 100%");
         tgeReleasePercentage = _tgeReleasePercentage;
     }
 
     function _vestingSchedule(uint256 totalAllocation, uint64 timestamp) internal view override returns (uint256) {
         if (timestamp < start()) {
-            return (totalAllocation * tgeReleasePercentage) / 100;
+            return (totalAllocation * tgeReleasePercentage) / 10 ** 6;
         } else if (timestamp > start() + duration()) {
             return totalAllocation;
         } else {
-            uint256 tge_round_release = (totalAllocation * tgeReleasePercentage) / 100;
+            uint256 tge_round_release = (totalAllocation * tgeReleasePercentage) / 10 ** 6;
             uint256 current_round_release = (((totalAllocation - tge_round_release) * getVestingRound(timestamp)) /
                 vestingReleaseTimestamp.length);
             return tge_round_release + current_round_release;

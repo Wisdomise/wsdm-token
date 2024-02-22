@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-pragma solidity ^0.8.0;
+pragma solidity =0.8.18;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -10,7 +10,6 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 
 contract Locking is ERC20, Pausable, Ownable {
     using SafeERC20 for IERC20;
-    using SafeERC20 for IERC20Permit;
 
     struct LockInfo {
         uint256 startTimestamp;
@@ -25,10 +24,12 @@ contract Locking is ERC20, Pausable, Ownable {
     address public penaltyTreasury;
     IERC20 public immutable wsdmTokenAddress;
     uint256 constant MONTHLY_PENALTY_INTERVAL = 30 days;
+    uint256 constant RESCUE_WAIT_PERIOD = 7 days;
     uint256 public freeUnlockDuration;
-    bool public emergencyExit;
+    bool public immediateFreeExit;
     address public pauser;
     uint256 public numberOfFreeTrialPeriod;
+    uint256 public pauseTimestamp;
     uint64 public configCounter;
 
     mapping(address => LockInfo) private _lockedUsers;
@@ -38,14 +39,14 @@ contract Locking is ERC20, Pausable, Ownable {
 
     event TokenLocked(address indexed owner, uint256 amount);
     event TokenUnlocked(address indexed owner, uint256 amount);
-    event EmergencyExitSet(bool status);
+    event ImmediateFreeExitSet(bool status);
     event Withdrew(address indexed owner, uint256 amount, uint256 penalty);
+    event RescuedFunds(address indexed owner, uint256 amount);
     event NewConfigSet(uint64 configCounter);
-
-    modifier whenNotPausedOrEmergencyExitActive() {
-        require(!paused() || emergencyExit, "Locking: Paused and Emergency Exit is deactivated");
-        _;
-    }
+    event FreeTrialPeriodSet(uint256 numberOfFreeTrialPeriod);
+    event FreeUnlockDurationSet(uint256 freeUnlockDurationInSecond);
+    event PenaltyTreasurySet(address penaltyTreasury);
+    event PauserSet(address pauser);
 
     modifier onlyPauser() {
         require(msg.sender == pauser, "Locking: caller is not the pauser");
@@ -75,6 +76,7 @@ contract Locking is ERC20, Pausable, Ownable {
 
     function _setNumberOfFreeTrialPeriod(uint256 _numberOfFreeTrialPeriod) private {
         numberOfFreeTrialPeriod = _numberOfFreeTrialPeriod;
+        emit FreeTrialPeriodSet(_numberOfFreeTrialPeriod);
     }
 
     function setFreeUnlockDuration(uint256 freeUnlockDurationInSecond_) public onlyOwner {
@@ -83,6 +85,7 @@ contract Locking is ERC20, Pausable, Ownable {
 
     function _setFreeUnlockDuration(uint256 _freeUnlockDurationInSecond) private {
         freeUnlockDuration = _freeUnlockDurationInSecond;
+        emit FreeUnlockDurationSet(_freeUnlockDurationInSecond);
     }
 
     function setWithdrawPeriod(uint256 withdrawPeriod) public onlyOwner {
@@ -103,15 +106,21 @@ contract Locking is ERC20, Pausable, Ownable {
     }
 
     function _setConfig(uint64[12] memory _monthlyPenaltyFees, uint256 _withdrawPeriod) private {
+        for (uint8 i = 0; i < 12; ) {
+            require(_monthlyPenaltyFees[i] <= 10 ** 6, "Locking: penalty fee should not be more than 100%");
+            unchecked {
+                i++;
+            }
+        }
         configCounter += 1;
         monthlyPenaltyConfigs[configCounter] = _monthlyPenaltyFees;
         withdrawPeriodConfigs[configCounter] = _withdrawPeriod;
         emit NewConfigSet(configCounter);
     }
 
-    function setEmergencyExit(bool emergencyExit_) external onlyOwner {
-        emergencyExit = emergencyExit_;
-        emit EmergencyExitSet(emergencyExit_);
+    function setImmediateFreeExit(bool immediateFreeExit_) external onlyOwner {
+        immediateFreeExit = immediateFreeExit_;
+        emit ImmediateFreeExitSet(immediateFreeExit_);
     }
 
     function getLockedUsers(address user) public view returns (LockInfo memory) {
@@ -136,6 +145,7 @@ contract Locking is ERC20, Pausable, Ownable {
 
     function _setPenaltyTreasury(address _penaltyTreasury) private {
         penaltyTreasury = _penaltyTreasury;
+        emit PenaltyTreasurySet(_penaltyTreasury);
     }
 
     function setPauser(address pauser_) public onlyOwner {
@@ -144,6 +154,7 @@ contract Locking is ERC20, Pausable, Ownable {
 
     function _setPauser(address _pauser) private {
         pauser = _pauser;
+        emit PauserSet(_pauser);
     }
 
     function lock(uint256 amount) public whenNotPaused {
@@ -158,11 +169,13 @@ contract Locking is ERC20, Pausable, Ownable {
         bytes32 r,
         bytes32 s
     ) public whenNotPaused {
-        IERC20Permit(address(wsdmTokenAddress)).safePermit(msg.sender, address(this), value, deadline, v, r, s);
+        try
+            IERC20Permit(address(wsdmTokenAddress)).permit(msg.sender, address(this), value, deadline, v, r, s)
+        {} catch {}
         _lock(amount);
     }
 
-    function unlock() public whenNotPausedOrEmergencyExitActive {
+    function unlock() public whenNotPaused {
         uint256 balance = balanceOf(msg.sender);
         require(balance > 0, "Locking: You cannot unlock tokens as you don't have any locked tokens");
         require(
@@ -182,7 +195,7 @@ contract Locking is ERC20, Pausable, Ownable {
 
         _burn(msg.sender, balance);
         emit TokenUnlocked(msg.sender, balance);
-        if (_unlockedUsers[msg.sender].withdrawTimestamp == block.timestamp || emergencyExit) withdraw();
+        if (_unlockedUsers[msg.sender].withdrawTimestamp == block.timestamp || immediateFreeExit) withdraw();
     }
 
     function cancelUnlock() public whenNotPaused {
@@ -199,13 +212,13 @@ contract Locking is ERC20, Pausable, Ownable {
         emit TokenLocked(msg.sender, _unlockAmount);
     }
 
-    function withdraw() public whenNotPausedOrEmergencyExitActive {
+    function withdraw() public whenNotPaused {
         require(
             _unlockedUsers[msg.sender].unlockAmount > 0,
             "Locking: You cannot withdraw without unlocking your tokens"
         );
         require(
-            _unlockedUsers[msg.sender].withdrawTimestamp <= block.timestamp || emergencyExit,
+            _unlockedUsers[msg.sender].withdrawTimestamp <= block.timestamp || immediateFreeExit,
             "Locking: Unable to withdraw, please wait until your withdrawal is released"
         );
         uint256 balance = _unlockedUsers[msg.sender].unlockAmount;
@@ -218,8 +231,15 @@ contract Locking is ERC20, Pausable, Ownable {
         emit Withdrew(msg.sender, balance, _penalty);
     }
 
+    function emergencyRescueFunds(uint256 amount) public whenPaused onlyOwner {
+        require(block.timestamp >= pauseTimestamp + RESCUE_WAIT_PERIOD, "Locking: rescue wait period is not over");
+        require(amount <= wsdmTokenAddress.balanceOf(address(this)), "Locking: rescue amount exceeds contract balance");
+        wsdmTokenAddress.safeTransfer(msg.sender, amount);
+        emit RescuedFunds(msg.sender, amount);
+    }
+
     function calculatePenalty(address locker, uint256 balance, uint256 unlockTimestamp) public view returns (uint256) {
-        if (emergencyExit) {
+        if (immediateFreeExit) {
             return 0;
         }
         return (balance * calculatePenaltyFee(locker, unlockTimestamp)) / 10 ** 6;
@@ -257,6 +277,7 @@ contract Locking is ERC20, Pausable, Ownable {
     }
 
     function pause() public onlyPauser {
+        pauseTimestamp = block.timestamp;
         _pause();
     }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-pragma solidity ^0.8.9;
+pragma solidity =0.8.18;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -20,20 +20,29 @@ contract TokenMigration is Ownable {
         STRATEGIC
     }
 
-    mapping(address => uint256) angelInvestors;
-    mapping(address => uint256) strategicInvestors;
+    mapping(address => uint256) angelInvestorShares;
+    mapping(address => uint256) strategicInvestorShares;
 
     event InvestorInserted(address indexed investor, uint256 balance, InvestorType investorType);
-    event InvestorMigrated(address indexed investor);
+    event InvestorMigrated(address indexed investor, uint256 totalShares);
 
     constructor(
         IERC20 _twsdmTokenAddress,
         ITokenDistributor _angelDistributorContract,
         ITokenDistributor _strategicDistributorContract
-    ) {
+    )
+        validAddress(address(_twsdmTokenAddress))
+        validAddress(address(_angelDistributorContract))
+        validAddress(address(_strategicDistributorContract))
+    {
         twsdmTokenAddress = _twsdmTokenAddress;
         angelDistributorContract = _angelDistributorContract;
         strategicDistributorContract = _strategicDistributorContract;
+    }
+
+    modifier validAddress(address _addr) {
+        require(_addr != address(0), "TokenMigration: input address should not be address zero");
+        _;
     }
 
     function addBulkAngelInvestor(address[] memory investors, uint256[] memory balances) public onlyOwner {
@@ -45,33 +54,31 @@ contract TokenMigration is Ownable {
     }
 
     function migrate() public {
+        uint256 angelRoundShares = angelInvestorShares[msg.sender];
+        uint256 strategicRoundShares = strategicInvestorShares[msg.sender];
+        uint256 totalShares = angelRoundShares + strategicRoundShares;
+        require(totalShares > 0, "TokenMigration: zero total investor shares");
+
         uint256 balance = twsdmTokenAddress.balanceOf(msg.sender);
-        require(balance > 0, "TokenMigration: zero twsdm balance");
+        require(balance >= totalShares, "TokenMigration: twsdm balance is less than investor shares");
 
-        uint256 angelInvestorShares = angelInvestors[msg.sender];
-        uint256 strategicInvestorShares = strategicInvestors[msg.sender];
-        require(
-            balance == angelInvestorShares + strategicInvestorShares,
-            "TokenMigration: twsdm balance does not match with investor shares"
-        );
+        angelInvestorShares[msg.sender] = 0;
+        strategicInvestorShares[msg.sender] = 0;
 
-        angelInvestors[msg.sender] = 0;
-        strategicInvestors[msg.sender] = 0;
+        _burnTwsdm(totalShares);
 
-        _burnTwsdm(balance);
+        _registerPayeeInDistributor(angelDistributorContract, msg.sender, angelRoundShares);
+        _registerPayeeInDistributor(strategicDistributorContract, msg.sender, strategicRoundShares);
 
-        _registerPayeeInDistributor(angelDistributorContract, msg.sender, angelInvestorShares);
-        _registerPayeeInDistributor(strategicDistributorContract, msg.sender, strategicInvestorShares);
-
-        emit InvestorMigrated(msg.sender);
+        emit InvestorMigrated(msg.sender, totalShares);
     }
 
     function getAngelInvestorBalance(address investor) public view returns (uint256) {
-        return angelInvestors[investor];
+        return angelInvestorShares[investor];
     }
 
     function getStrategicInvestorBalance(address investor) public view returns (uint256) {
-        return strategicInvestors[investor];
+        return strategicInvestorShares[investor];
     }
 
     function _addBulkInvestor(
@@ -82,8 +89,11 @@ contract TokenMigration is Ownable {
         require(investors.length == balances.length, "TokenMigration: investors and balances length does not match");
         require(investors.length > 0, "TokenMigration: no investor added");
 
-        for (uint256 i = 0; i < investors.length; i++) {
+        for (uint256 i = 0; i < investors.length; ) {
             _addInvestor(investors[i], balances[i], investorType);
+            unchecked {
+                i++;
+            }
         }
     }
 
@@ -91,9 +101,9 @@ contract TokenMigration is Ownable {
         require(investor != address(0), "TokenMigration: investor should not be address zero");
 
         if (investorType == InvestorType.ANGEL) {
-            angelInvestors[investor] = balance;
+            angelInvestorShares[investor] = balance;
         } else if (investorType == InvestorType.STRATEGIC) {
-            strategicInvestors[investor] = balance;
+            strategicInvestorShares[investor] = balance;
         }
 
         emit InvestorInserted(investor, balance, investorType);
